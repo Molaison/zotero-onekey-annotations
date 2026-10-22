@@ -13,6 +13,7 @@ var OneKeyPDFAnnotations = {
     ['Limitation', '#aaaaaa', 'KeyF'],
   ]),
   NOTE_KEYS: Object.freeze(['KeyZ', 'KeyX', 'KeyC', 'KeyV']),
+  HIDE_STYLE_ID: 'onekey-pdf-annotations-hidden',
   _id: null,
   _started: false,
   _listenerRegistered: false,
@@ -118,37 +119,51 @@ var OneKeyPDFAnnotations = {
     if (!reader || !this.isPDF(reader)) return;
     let state = this._readerStates.get(reader);
     if (!state) {
-      state = { windows: new Map(), patches: new Map(), status: null, statusTimer: null };
+      state = {
+        windows: new Map(), patches: new Map(), status: null, statusTimer: null,
+        annotationsHidden: false, sdtVisibility: new Map(),
+      };
       this._readerStates.set(reader, state);
     }
     const outer = reader._iframeWindow;
     if (outer) this._addReaderWindow(reader, state, outer, 'outer');
     const ir = reader._internalReader;
-    for (const view of [ir?._primaryView, ir?._secondaryView]) {
+    // Zotero 10 can replace the interactive PDF view with an SDT (Reading Mode)
+    // overlay. Its iframe is a distinct document and must be observed as well.
+    const views = [ir?._primaryView, ir?._secondaryView, ir?._primarySDTView, ir?._secondarySDTView]
+      .filter(Boolean);
+    for (const view of views) {
       if (!view) continue;
       if (view._iframeWindow) this._addReaderWindow(reader, state, view._iframeWindow, 'pdf');
       this._patchForwarder(reader, state, view);
     }
     // A split-view refresh may replace the inner iframe or view object.
-    const live = new Set([outer, ir?._primaryView?._iframeWindow, ir?._secondaryView?._iframeWindow]);
+    const live = new Set([outer, ...views.map(v => v._iframeWindow)]);
     for (const [win, info] of state.windows) {
       if (!live.has(win)) {
         this._removeFrameListeners(win, info);
         state.windows.delete(win);
       }
     }
-    const liveViews = new Set([ir?._primaryView, ir?._secondaryView].filter(Boolean).map(v => this._unwrap(v)));
+    const liveViews = new Set(views.map(v => this._unwrap(v)));
     for (const [view, patch] of state.patches) {
       if (!liveViews.has(view)) {
         this._unpatch(view, patch);
         state.patches.delete(view);
       }
     }
+    for (const view of state.sdtVisibility.keys()) {
+      if (!liveViews.has(this._unwrap(view))) state.sdtVisibility.delete(view);
+    }
+    if (state.annotationsHidden) this._applyAnnotationVisibility(reader, state);
   },
 
   removeReader(reader) {
     const state = this._readerStates.get(reader);
     if (!state) return;
+    // Never leave a document visually hidden after disabling the plugin.
+    state.annotationsHidden = false;
+    this._applyAnnotationVisibility(reader, state);
     for (const [win, info] of state.windows) {
       this._removeFrameListeners(win, info);
     }
@@ -193,8 +208,12 @@ var OneKeyPDFAnnotations = {
     const self = this;
     const wrapper = function(event) {
       try {
-        if (self.getAction(event, reader, view._iframeWindow, 'pdf')) return;
-      } catch (_) {}
+        // Zotero registers its capture listener before plugins can attach
+        // theirs. It forwards directly into this callback, sometimes before
+        // a plugin's DOM listener can run at all. Filtering the forwarding
+        // without EXECUTING the action silently eats every highlight key.
+        if (self.handleKey(event, reader, view._iframeWindow, 'pdf')) return;
+      } catch (error) { self.log('Forwarded key action failed: ' + error); }
       return original.call(view, event);
     };
     try {
@@ -319,10 +338,8 @@ var OneKeyPDFAnnotations = {
     const view = this.getView(reader, pdfWin);
     try {
       if (action.type === 'hideAnnotations' || action.type === 'showAnnotations') {
-        const ir = reader._internalReader;
-        if (typeof ir?.showAnnotations !== 'function') throw new Error('Zotero reader.showAnnotations unavailable');
         const visible = action.type === 'showAnnotations';
-        ir.showAnnotations(visible);
+        this.setAnnotationVisibility(reader, visible);
         this.status(reader, visible ? 'All annotations shown' : 'All annotations hidden (not deleted)', '#aaaaaa');
       } else if (action.type === 'delete') {
         const ir = reader._internalReader;
@@ -348,7 +365,10 @@ var OneKeyPDFAnnotations = {
 
   getView(reader, preferredPdfWin) {
     const ir = reader?._internalReader;
-    const views = [ir?._primaryView, ir?._secondaryView].filter(Boolean);
+    // Pick the *active* view, otherwise highlights made in Zotero 10 Reading
+    // Mode would incorrectly try to read the hidden PDF's stale selection.
+    const views = [ir?._activePrimaryView || ir?._primarySDTView || ir?._primaryView,
+      ir?._activeSecondaryView || ir?._secondarySDTView || ir?._secondaryView].filter(Boolean);
     if (preferredPdfWin) {
       const match = views.find(v => v._iframeWindow === preferredPdfWin);
       if (match) return match;
@@ -360,7 +380,7 @@ var OneKeyPDFAnnotations = {
     return ir?._lastView || views[0] || null;
   },
 
-  getSelectionAnnotation(reader, view) {
+  getSelectionAnnotation(reader, view, color) {
     const ir = reader?._internalReader;
     try {
       // Use Zotero's own text-selection geometry, rather than estimating
@@ -376,9 +396,21 @@ var OneKeyPDFAnnotations = {
     // An empty ranges array means the selection was cleared: using a stale
     // popup would create the *same highlight twice* on consecutive keys.
     if (Array.isArray(view?._selectionRanges)) return null;
+    // SDT/Reading Mode uses native DOM text selections, not PDF selectionRanges.
+    // Do not use cached popup geometry unless text really is selected now.
+    try {
+      const selection = view?._iframeWindow?.getSelection?.();
+      if (!selection || selection.isCollapsed || !selection.rangeCount) return null;
+      if (typeof view._getAnnotationFromTextSelection === 'function') {
+        const ann = view._getAnnotationFromTextSelection('highlight', color);
+        if (ann?.position && ann.sortIndex && ann.text) {
+          return typeof view._finalizeAnnotation === 'function' ? view._finalizeAnnotation(ann) : ann;
+        }
+      }
+    } catch (error) { this.log('Reading Mode selection: ' + error); }
     // Zotero already computed this for the native selection popup.
     try {
-      const isSecondary = view === ir?._secondaryView;
+      const isSecondary = view === ir?._secondaryView || view === ir?._secondarySDTView;
       const popup = ir?._state?.[isSecondary ? 'secondaryViewSelectionPopup' : 'primaryViewSelectionPopup'];
       if (popup?.annotation?.position && popup.annotation.sortIndex && popup.annotation.text) return popup.annotation;
     } catch (_) {}
@@ -386,7 +418,7 @@ var OneKeyPDFAnnotations = {
   },
 
   createHighlightFromSelection(reader, view, color) {
-    const ann = this.getSelectionAnnotation(reader, view);
+    const ann = this.getSelectionAnnotation(reader, view, color);
     if (!ann) return false;
     const ir = reader._internalReader;
     if (!ir?._annotationManager?.addAnnotation || !reader._iframeWindow) return false;
@@ -408,6 +440,57 @@ var OneKeyPDFAnnotations = {
     try { view._setSelectionRanges?.(); } catch (_) {}
     try { view._iframeWindow?.getSelection?.()?.removeAllRanges?.(); } catch (_) {}
     return true;
+  },
+
+  setAnnotationVisibility(reader, visible) {
+    let state = this._readerStates.get(reader);
+    if (!state) {
+      state = {
+        windows: new Map(), patches: new Map(), status: null, statusTimer: null,
+        annotationsHidden: false, sdtVisibility: new Map(),
+      };
+      this._readerStates.set(reader, state);
+    }
+    state.annotationsHidden = !visible;
+    this._applyAnnotationVisibility(reader, state);
+  },
+
+  _applyAnnotationVisibility(reader, state) {
+    const ir = reader?._internalReader;
+    // The PDFView class in zotero/reader defines a NO-OP showAnnotations()
+    // and does not implement setShowAnnotations(). Calling reader.showAnnotations
+    // is therefore broken for PDF. Hide only the Zotero annotation overlay
+    // with a reversible style, never the PDF page or actual annotation data.
+    for (const view of [ir?._primaryView, ir?._secondaryView]) {
+      const doc = view?._iframeWindow?.document;
+      if (!doc?.getElementById || !doc?.createElement) continue;
+      try {
+        let style = doc.getElementById(this.HIDE_STYLE_ID);
+        if (state.annotationsHidden && !style) {
+          style = doc.createElement('style');
+          style.id = this.HIDE_STYLE_ID;
+          style.textContent = '.annotationOverlay { display: none !important; }';
+          (doc.head || doc.documentElement)?.appendChild(style);
+        }
+        if (!state.annotationsHidden) style?.remove();
+      } catch (error) { this.log('Annotation visibility CSS: ' + error); }
+    }
+    // Reading Mode is a different DOMView implementation: unlike PDFView it
+    // really supports setShowAnnotations(), so use its renderer's own switch.
+    for (const view of [ir?._primarySDTView, ir?._secondarySDTView]) {
+      if (typeof view?.setShowAnnotations !== 'function') continue;
+      try {
+        if (state.annotationsHidden) {
+          if (!state.sdtVisibility.has(view)) {
+            state.sdtVisibility.set(view, view._showAnnotations !== false);
+          }
+          view.setShowAnnotations(false);
+        } else if (state.sdtVisibility.has(view)) {
+          view.setShowAnnotations(state.sdtVisibility.get(view));
+          state.sdtVisibility.delete(view);
+        }
+      } catch (error) { this.log('Reading Mode visibility: ' + error); }
+    }
   },
 
   setTool(reader, type, color) {
