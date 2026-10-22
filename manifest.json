@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "One-Key PDF Annotations",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Physical-key, IME-safe PDF highlight/note/rectangle, delete and visibility shortcuts for Zotero 7–10.",
   "author": "Custom research workflow",
   "applications": {
