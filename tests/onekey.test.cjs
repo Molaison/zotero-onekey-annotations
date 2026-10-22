@@ -11,14 +11,23 @@ function setup() {
   const visibility = [];
   let originalForwarded = 0;
   let cleaned = 0;
+  function documentWithStyles(activeTag) {
+    const nodes = new Map();
+    return {
+      activeElement: { tagName: activeTag, nodeType: 1 },
+      getElementById: id => nodes.get(id) || null,
+      createElement: tag => ({ tagName: tag.toUpperCase(), remove() { nodes.delete(this.id); } }),
+      head: { appendChild(node) { nodes.set(node.id, node); } },
+    };
+  }
   const pdfWin = {
-    document: { activeElement: { tagName: 'BODY', nodeType: 1 } },
+    document: documentWithStyles('BODY'),
     addEventListener(type, handler) { (this.listeners ||= {})[type] = handler; if (type === 'keydown') this.listener = handler; },
     removeEventListener(type) { cleaned++; if (this.listeners) delete this.listeners[type]; },
     getSelection() { return { removeAllRanges() {} }; },
   };
   const outerWin = {
-    document: { activeElement: { tagName: 'IFRAME', nodeType: 1 } },
+    document: documentWithStyles('IFRAME'),
     addEventListener(type, handler) { (this.listeners ||= {})[type] = handler; if (type === 'keydown') this.listener = handler; },
     removeEventListener(type) { cleaned++; if (this.listeners) delete this.listeners[type]; },
   };
@@ -39,7 +48,9 @@ function setup() {
     _annotationManager: { addAnnotation(annotation) { added.push(annotation); return { ...annotation, id: 'ABCD1234' }; } },
     setTool(obj) { setCalls.push(obj); },
     deleteAnnotations(ids) { deleted.push([...ids]); this._state.selectedAnnotationIDs = []; return ids.length; },
-    showAnnotations(value) { visibility.push(value); this._state.showAnnotations = value; },
+    // Zotero's PDFView lacks setShowAnnotations; the reader-level method is
+    // not a supported route for PDF and would fail at runtime.
+    showAnnotations() { throw new Error('PDFView.setShowAnnotations is not a function'); },
   };
   const reader = { type: 'pdf', _internalReader: internal, _iframeWindow: outerWin, _instanceID: 'reader1' };
   const hookNames = [];
@@ -77,7 +88,7 @@ function setup() {
     };
     return ev;
   }
-  return { api, Zotero, reader, internal, view, outerWin, pdfWin, setCalls, added, deleted, visibility, event, hookNames, countForwarded: () => originalForwarded, countCleaned: () => cleaned };
+  return { api, Zotero, reader, internal, view, outerWin, pdfWin, setCalls, added, deleted, visibility, event, hookNames, documentWithStyles, countForwarded: () => originalForwarded, countCleaned: () => cleaned };
 }
 
 test('8 physical-letter codes map exactly to Zotero default color order', () => {
@@ -174,6 +185,9 @@ test('patched inner reader forwarding suppresses R default command, not other co
   const r = f.event('KeyR');
   f.view._onKeyDown(r);
   assert.equal(f.countForwarded(), 0, 'R must not reach Zotero native Read Aloud');
+  assert.equal(f.setCalls.length, 1, 'forwarded key must actually activate the highlight tool');
+  assert.equal(f.setCalls[0].color, '#2ea8e5');
+  assert.equal(r.prevented, 1);
   const normal = f.event('KeyA');
   f.view._onKeyDown(normal);
   assert.equal(f.countForwarded(), 1);
@@ -376,13 +390,13 @@ test('D with multiple selected annotations defers native confirmation to Zotero'
 
 test('Alt+H hides all annotation overlays and Alt+S restores visibility', () => {
   const f = setup();
-  for (const [code, expected] of [['KeyH', false], ['KeyS', true]]) {
+  for (const [code, expected] of [['KeyH', true], ['KeyS', false]]) {
     const e = f.event(code, {altKey: true});
     assert.equal(f.api.handleKey(e, f.reader, f.pdfWin, 'pdf'), true);
     assert.equal(e.prevented, 1);
-    assert.equal(f.internal._state.showAnnotations, expected);
+    assert.equal(!!f.pdfWin.document.getElementById(f.api.HIDE_STYLE_ID), expected);
   }
-  assert.deepEqual(f.visibility, [false, true]);
+  assert.equal(f.internal._state.showAnnotations, true);
   assert.deepEqual(f.deleted, []);
 });
 
@@ -393,8 +407,9 @@ test('Alt+H/S work in read-only PDFs while D and editing commands do not', () =>
   assert.equal(f.api.handleKey(f.event('KeyD'), f.reader, f.pdfWin, 'pdf'), false);
   assert.equal(f.api.handleKey(f.event('KeyR'), f.reader, f.pdfWin, 'pdf'), false);
   assert.equal(f.api.handleKey(f.event('KeyH',{altKey:true}), f.reader, f.pdfWin, 'pdf'), true);
+  assert.ok(f.pdfWin.document.getElementById(f.api.HIDE_STYLE_ID));
   assert.equal(f.api.handleKey(f.event('KeyS',{altKey:true}), f.reader, f.pdfWin, 'pdf'), true);
-  assert.deepEqual(f.visibility, [false, true]);
+  assert.equal(f.pdfWin.document.getElementById(f.api.HIDE_STYLE_ID), null);
   assert.deepEqual(f.deleted, []);
 });
 
@@ -416,7 +431,7 @@ test('Alt+H/S never hijack inputs, IME composition, or compound modifiers', () =
     assert.equal(f.api.handleKey(e,f.reader,f.pdfWin,'pdf'),false,code);
     assert.equal(e.prevented,0);
   }
-  assert.deepEqual(f.visibility, []);
+  assert.equal(f.pdfWin.document.getElementById(f.api.HIDE_STYLE_ID), null);
   assert.deepEqual(f.deleted, []);
 });
 
@@ -435,7 +450,75 @@ test('PDF forwarding patches also suppress Zotero native handling of D/Alt+H/Alt
 
 test('Alt+S show-all works with physical key code even when IME key is Process', () => {
   const f=setup();
+  f.api.handleKey(f.event('KeyH',{altKey:true}),f.reader,f.pdfWin,'pdf');
   const e=f.event('KeyS',{key:'Process',altKey:true});
   assert.equal(f.api.handleKey(e,f.reader,f.pdfWin,'pdf'),true);
-  assert.deepEqual(f.visibility,[true]);
+  assert.equal(f.pdfWin.document.getElementById(f.api.HIDE_STYLE_ID),null);
+});
+
+test('hide persists across split pane and iframe recreation, and unload restores overlays', () => {
+  const f = setup();
+  f.api.start('onekey-pdf-annotations@local.zotero');
+  f.api.handleKey(f.event('KeyH', {altKey:true}), f.reader, f.pdfWin, 'pdf');
+  assert.ok(f.pdfWin.document.getElementById(f.api.HIDE_STYLE_ID));
+  const win2 = { document:f.documentWithStyles('BODY'),
+    addEventListener() {}, removeEventListener() {} };
+  f.internal._secondaryView = { _iframeWindow:win2, _onKeyDown() {} };
+  f.api.scanReaders();
+  assert.ok(win2.document.getElementById(f.api.HIDE_STYLE_ID));
+  const win3 = { document:f.documentWithStyles('BODY'),
+    addEventListener() {}, removeEventListener() {} };
+  f.view._iframeWindow = win3;
+  f.api.scanReaders();
+  assert.ok(win3.document.getElementById(f.api.HIDE_STYLE_ID));
+  f.api.stop();
+  assert.equal(win3.document.getElementById(f.api.HIDE_STYLE_ID),null);
+  assert.equal(win2.document.getElementById(f.api.HIDE_STYLE_ID),null);
+});
+
+test('Reading Mode keydown is attached to SDT iframe and creates direct highlight from live selection', () => {
+  const f = setup();
+  let cleared = 0;
+  const readingWin = { document:f.documentWithStyles('BODY'),
+    addEventListener(type,handler) { (this.listeners ||= {})[type] = handler; },
+    removeEventListener(type) { delete this.listeners[type]; },
+    getSelection() { return {isCollapsed:false,rangeCount:1,removeAllRanges() {cleared++;}}; },
+  };
+  const sdt = {
+    _iframeWindow:readingWin,
+    _getAnnotationFromTextSelection(type,color) {
+      return {type,color,sortIndex:'sdt-1',pageLabel:'5',text:'reading mode text',
+        position:{pageIndex:4, rects:[[1,2,3,4]]}};
+    },
+    _finalizeAnnotation(a) { return a; },
+    setShowAnnotations(val) { this._showAnnotations=val; },
+    _showAnnotations:true,
+  };
+  f.internal._primarySDTView=sdt;
+  f.internal._activePrimaryView=sdt;
+  f.api.start('onekey-pdf-annotations@local.zotero');
+  assert.equal(typeof readingWin.listeners.keydown,'function');
+  readingWin.listeners.keydown(f.event('KeyR'));
+  assert.equal(f.added.length,1);
+  assert.equal(f.added[0].color,'#2ea8e5');
+  assert.equal(f.added[0].text,'reading mode text');
+  assert.equal(cleared,1);
+  f.api.handleKey(f.event('KeyH',{altKey:true}),f.reader,readingWin,'pdf');
+  assert.equal(sdt._showAnnotations,false);
+  f.api.handleKey(f.event('KeyS',{altKey:true}),f.reader,readingWin,'pdf');
+  assert.equal(sdt._showAnnotations,true);
+  f.api.stop();
+});
+
+test('forwarder alone saves highlighted selection without any DOM listener callback', () => {
+  const f=setup();
+  f.api.start('onekey-pdf-annotations@local.zotero');
+  f.view._selectionRanges=[{collapsed:false,position:{pageIndex:2}}];
+  const key=f.event('KeyQ');
+  f.view._onKeyDown(key);
+  assert.equal(f.added.length,1);
+  assert.equal(f.added[0].color,'#ffd400');
+  assert.equal(f.countForwarded(),0);
+  assert.equal(key.prevented,1);
+  f.api.stop();
 });
