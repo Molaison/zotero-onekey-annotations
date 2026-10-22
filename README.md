@@ -1,4 +1,4 @@
-# Zotero One-Key PDF Annotations · v0.3.0
+# Zotero One-Key PDF Annotations · v0.3.1
 
 为 Zotero 内置 PDF 阅读器添加**无修饰键的单键标注**。不使用 AutoHotkey，不修改 Zotero 的已有标注数据，不会在普通 Zotero 条目列表或正文输入框中覆盖打字。
 
@@ -27,12 +27,12 @@
 - `Z/X/C/V` 切换不同颜色的**便签**工具，然后在页面上点一下放置。
 - `M` 切换到 Zotero 的 **Area/Image** 工具，再拖拽一个矩形区域。注意：**这不是矩形边框绘图**，而是 Zotero 原生矩形区域标注。
 - `D` 只有选中一个或多个标注时才会删除，**没有选中标注时不操作**。多选交给 Zotero 原生的确认对话框处理。
-- `Alt+H` 只将当前阅读器所有标注**隐藏**，不修改标注数据。`Alt+S` 重新显示。两者在只读 PDF 中也有效；不会影响其他 PDF 阅读器标签的永久标注数据。
+- `Alt+H` 隐藏当前阅读器的 Zotero 标注覆盖层（包括高亮、便签等）；`Alt+S` 恢复显示。**只作用于显示，不删除或改动批注**。适用于普通 PDF、分栏与 Zotero 10 Reading Mode，并且不会隐藏直接烙印在 PDF 原始页面上的文字/图形。
 - `Esc`、复制粘贴组合键及其他未映射的 Zotero 快捷键仍按原生方式使用；阅读器内的 `R` 则让位给 Results 高亮。
 
 ## 安装 / 升级
 
-1. 在 [GitHub Releases](https://github.com/Molaison/zotero-onekey-annotations/releases) 下载 `onekey-pdf-annotations-0.3.0.xpi`（**不需要**解压）。
+1. 在 [GitHub Releases](https://github.com/Molaison/zotero-onekey-annotations/releases) 下载 `onekey-pdf-annotations-0.3.1.xpi`（**不需要**解压）。
 2. Zotero → **工具 → 插件 → 右上角齿轮 → 从文件安装插件**。
 3. 选择 `.xpi`，确认；若已经安装 v0.1.0，则是同一插件 ID 的就地升级。
 4. 关闭并重新打开现有 PDF 标签页。若新快捷键仍不生效，重启 Zotero。
@@ -47,6 +47,8 @@
 - 正在输入法组词时，同时依靠 `isComposing` 和 `compositionstart/compositionend` 阻止触发。
 - Ctrl、Shift、Cmd 组合一律放行；仅保留明确指定的 `Alt+H` / `Alt+S`，其余 Alt 组合放行；长按重复事件被吞掉而不重复创建批注。
 - 修复 Zotero 10 中同一标注工具连续换色可能因为引用不变而没有刷新 PDF 视图的问题。
+- v0.3.1 修复先于插件监听到达的 Zotero 键盘转发事件：转发钩子会真正执行标注命令，而不只是拦截原生按键。
+- v0.3.1 修复旧版 `Alt+H` 误用阅读器 `showAnnotations()` 引起的无效隐藏，改为可逆的 PDF 标注层 CSS，并支持 Reading Mode 独立渲染。
 - 同样使用物理字母键的 Zotero Vim 等插件可能与本插件冲突，请避免重叠绑定。
 
 **技术边界：**操作系统或某些输入法可能在把按键交给 Zotero 之前就拦截它。软件插件无法强制获取这些丢失的键盘事件；它只能安全处理 Zotero 收到的按键。
@@ -75,7 +77,7 @@ node --test tests/onekey.test.cjs
 python build.py
 ```
 
-包含 25 组 Node 模拟测试：八色映射、便签/矩形、直接保存高亮、连按同类型工具换色、选区去重、IME 组词、输入字段及工具栏控件屏蔽、Read Aloud 冲突、只读保护、分栏与 iframe 重建、插件退出后的清理、清单兼容字段等。**均非真实 GUI 联调**。
+包含 28 组 Node 模拟测试：八色映射、便签/矩形、直接保存高亮、连按同类型工具换色、选区去重、IME 组词、输入字段及工具栏控件屏蔽、Read Aloud 冲突、只读保护、分栏与 iframe 重建、插件退出后的清理、清单兼容字段等。**均非真实 GUI 联调**。
 
 打包 `.xpi` 只包含 `manifest.json`、`bootstrap.js`、`content/onekey.js`，不依赖网络访问或外部服务。插件使用本地占位 `update_url`（Zotero 清单字段要求），**不会自动收到新版本**，后续升级手动安装新版 `.xpi`。
 
