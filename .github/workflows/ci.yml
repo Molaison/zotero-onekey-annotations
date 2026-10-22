@@ -1,0 +1,40 @@
+name: Build and test
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: node --check bootstrap.js
+      - run: node --check content/onekey.js
+      - run: node --test tests/onekey.test.cjs
+      - run: python build.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zotero-onekey-xpi
+          path: '*.xpi'
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          test -f "onekey-pdf-annotations-${VERSION}.xpi"
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "onekey-pdf-annotations-${VERSION}.xpi" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" "onekey-pdf-annotations-${VERSION}.xpi" --generate-notes
+          fi

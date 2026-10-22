@@ -1,0 +1,4 @@
+# Generated locally. GitHub Actions publishes the tagged build as release asset.
+*.xpi
+__pycache__/
+node_modules/
